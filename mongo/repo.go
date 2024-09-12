@@ -2,6 +2,7 @@ package mongo
 
 import (
 	"context"
+	"errors"
 	"time"
 
 	"go.mongodb.org/mongo-driver/bson"
@@ -22,7 +23,7 @@ type IBaseRepo[T any] interface {
 
 	List(filter bson.M, page int64, size int64) ([]*T, int64, error)
 	All(filter bson.M) ([]*T, error)
-
+	Exist(filter bson.M) (bool, error)
 	Count(filter bson.M) (int64, error)
 	DeleteByID(id primitive.ObjectID) error
 }
@@ -149,6 +150,17 @@ func (r *BaseRepo[T]) All(filter bson.M) ([]*T, error) {
 	}
 
 	return result, nil
+}
+
+func (d *BaseRepo[T]) Exist(filter bson.M) (bool, error) {
+	_, err := d.FindOne(filter)
+	if err != nil {
+		if errors.Is(err, mongodb.ErrNoDocuments) {
+			return false, nil
+		}
+		return false, err
+	}
+	return true, nil
 }
 
 func (r *BaseRepo[T]) Count(filter bson.M) (int64, error) {

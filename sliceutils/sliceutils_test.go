@@ -1,7 +1,7 @@
 package sliceutils_test
 
 import (
-	"gobase/utils/sliceutils"
+	"gobase/sliceutils"
 	"testing"
 )
 

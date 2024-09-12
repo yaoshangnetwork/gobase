@@ -1,7 +1,7 @@
 package set_test
 
 import (
-	"gobase/utils/set"
+	"gobase/set"
 	"testing"
 )
 
