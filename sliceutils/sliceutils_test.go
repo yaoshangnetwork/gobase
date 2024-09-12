@@ -1,8 +1,9 @@
 package sliceutils_test
 
 import (
-	"gobase/sliceutils"
 	"testing"
+
+	"github.com/yaoshangnetwork/gobase/sliceutils"
 )
 
 func TestFilter(t *testing.T) {

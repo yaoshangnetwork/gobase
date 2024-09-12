@@ -1,8 +1,9 @@
 package set_test
 
 import (
-	"gobase/set"
 	"testing"
+
+	"github.com/yaoshangnetwork/gobase/set"
 )
 
 func TestSetAdd(t *testing.T) {

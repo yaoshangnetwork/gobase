@@ -1,4 +1,4 @@
-module gobase
+module github.com/yaoshangnetwork/gobase
 
 go 1.21.1
 
