@@ -33,7 +33,7 @@ func Init(config Config) *mongodb.Database {
 	// 检查连接
 	err = client.Ping(ctx, nil)
 	if err != nil {
-		log.Fatal(err)
+		panic(err)
 	}
 
 	// 选择数据库
