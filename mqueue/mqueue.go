@@ -21,6 +21,13 @@ type QueueItem struct {
 	Tries   int    `bson:"tries"`
 }
 
+type ackItem struct {
+	ID      primitive.ObjectID `bson:"_id,omitempty"`
+	Dead    bool               `bson:"dead"`
+	Visible time.Time          `bson:"visible"`
+	Deleted *time.Time         `bson:"deleted"`
+}
+
 func id() string {
 	return uuid.New().String()
 }
@@ -33,34 +40,31 @@ type MQueue struct {
 type Mode string
 
 const (
-	DebugMode   Mode = "debug"
-	ReleaseMode Mode = "release"
+	DebugMode         Mode = "debug"
+	ReleaseMode       Mode = "release"
+	DefaultVisibility      = time.Minute * 5
 )
 
 type QueueOpts struct {
 	Visibility time.Duration
 	MaxTries   int
 	Mode       Mode
+	Channels   []string
+	DB         DBConfig
 }
 
-func NewMQueue(db DBConfig, opts ...QueueOpts) *MQueue {
-	opt := &QueueOpts{
-		Visibility: time.Second * 60 * 5,
-		MaxTries:   -1,
-		Mode:       ReleaseMode,
+func NewMQueue(opts QueueOpts) *MQueue {
+	if opts.Visibility <= 0 {
+		panic("visibility must be greater than 0")
+	}
+	if len(opts.Channels) == 0 {
+		panic("channels cannot be empty")
+	}
+	if opts.Mode == "" {
+		opts.Mode = ReleaseMode
 	}
 
-	if len(opts) > 0 {
-		opt = &opts[0]
-		if opt.Visibility <= 0 {
-			panic("the value of visibility must be greater than 0")
-		}
-		if opt.Mode == "" {
-			opt.Mode = ReleaseMode
-		}
-	}
-
-	mq := &MQueue{coll: connect(db), opts: opt}
+	mq := &MQueue{coll: connect(opts.DB), opts: &opts}
 	mq.createIndexes()
 	return mq
 }
@@ -71,18 +75,7 @@ func (mq *MQueue) createIndexes() {
 
 	_, err := mq.coll.Indexes().CreateOne(context.Background(), mongo.IndexModel{
 		Keys: bson.D{
-			{Key: "visible", Value: 1},
-			{Key: "dead", Value: 1},
-			{Key: "deleted", Value: 1},
-		},
-	})
-	if err != nil {
-		panic(err)
-	}
-
-	_, err = mq.coll.Indexes().CreateOne(context.Background(), mongo.IndexModel{
-		Keys: bson.D{
-			{Key: "ack", Value: 1},
+			{Key: "channel", Value: 1},
 			{Key: "visible", Value: 1},
 			{Key: "dead", Value: 1},
 			{Key: "deleted", Value: 1},
@@ -131,12 +124,24 @@ func (mq *MQueue) Add(item ...Item) bool {
 	return mq.insertItems(item)
 }
 
+func (mq *MQueue) channelExist(c string) bool {
+	for _, channel := range mq.opts.Channels {
+		if c == channel {
+			return true
+		}
+	}
+	return false
+}
+
 func (mq *MQueue) insertItems(items []Item) bool {
 	if len(items) == 0 {
 		return false
 	}
 	docs := make([]interface{}, 0, len(items))
 	for _, item := range items {
+		if !mq.channelExist(item.Channel) {
+			return false
+		}
 		doc := map[string]any{
 			"ack":     id(),
 			"payload": item.Payload,
@@ -154,8 +159,11 @@ func (mq *MQueue) insertItems(items []Item) bool {
 }
 
 // Get
-func (mq *MQueue) Get() (*QueueItem, bool) {
-	query := bson.M{"visible": bson.M{"$lte": time.Now()}, "dead": false, "deleted": nil}
+func (mq *MQueue) Get(channel string) (*QueueItem, bool) {
+	if !mq.channelExist(channel) {
+		return nil, false
+	}
+	query := bson.M{"channel": channel, "visible": bson.M{"$lte": time.Now()}, "dead": false, "deleted": nil}
 	update := bson.M{
 		"$inc": bson.M{"tries": 1},
 		"$set": bson.M{"ack": id(), "visible": time.Now().Add(mq.opts.Visibility)},
@@ -177,21 +185,42 @@ func (mq *MQueue) Get() (*QueueItem, bool) {
 		mq.coll.UpdateOne(
 			context.Background(),
 			bson.M{"ack": item.Ack},
-			bson.M{"$set": bson.M{"dead": true}},
+			bson.M{"$set": bson.M{"dead": true, "deleted": time.Now()}},
 		)
 		return nil, false
 	}
 	return item, true
 }
 
+// Watch
+func (mq *MQueue) Watch(channel string, interval time.Duration) chan *QueueItem {
+	c := make(chan *QueueItem)
+	go func() {
+		defer close(c)
+		for {
+			if q, ok := mq.Get(channel); ok {
+				c <- q
+			}
+			time.Sleep(interval)
+		}
+	}()
+	return c
+}
+
 // Ack
 func (mq *MQueue) Ack(ack string) bool {
-	query := bson.M{"ack": ack, "visible": bson.M{"$gt": time.Now()}, "dead": false, "deleted": nil}
-	update := bson.M{
-		"$set": bson.M{"deleted": time.Now()},
+	item := new(ackItem)
+	err := mq.coll.FindOne(context.Background(), bson.M{"ack": ack}).Decode(item)
+	if err != nil {
+		return false
 	}
-	res, _ := mq.coll.UpdateOne(context.Background(), query, update)
-	return res.ModifiedCount == 1
+	if item.Visible.After(time.Now()) && !item.Dead && item.Deleted == nil {
+		res, _ := mq.coll.UpdateByID(context.Background(), item.ID, bson.M{
+			"$set": bson.M{"deleted": time.Now()},
+		})
+		return res.ModifiedCount == 1
+	}
+	return false
 }
 
 // Ping
@@ -208,31 +237,46 @@ func (mq *MQueue) Ping(ack string) bool {
 }
 
 // Total
-func (mq *MQueue) Total() (int64, error) {
+func (mq *MQueue) Total(channel ...string) (int64, error) {
+	if len(channel) >= 1 {
+		return mq.coll.CountDocuments(context.Background(), bson.M{"channel": channel[0]})
+	}
 	return mq.coll.CountDocuments(context.Background(), bson.M{})
 }
 
 // Size
-func (mq *MQueue) Size() (int64, error) {
+func (mq *MQueue) Size(channel ...string) (int64, error) {
 	query := bson.M{"visible": bson.M{"$lte": time.Now()}, "dead": false, "deleted": nil}
+	if len(channel) >= 1 {
+		query["channel"] = channel[0]
+	}
 	return mq.coll.CountDocuments(context.Background(), query)
 }
 
 // InFlight
-func (mq *MQueue) InFlight() (int64, error) {
+func (mq *MQueue) InFlight(channel ...string) (int64, error) {
 	query := bson.M{"visible": bson.M{"$gt": time.Now()}, "dead": false, "deleted": nil}
+	if len(channel) >= 1 {
+		query["channel"] = channel[0]
+	}
 	return mq.coll.CountDocuments(context.Background(), query)
 }
 
 // Done
-func (mq *MQueue) Done() (int64, error) {
+func (mq *MQueue) Done(channel ...string) (int64, error) {
 	query := bson.M{"deleted": bson.M{"$exists": true}}
+	if len(channel) >= 1 {
+		query["channel"] = channel[0]
+	}
 	return mq.coll.CountDocuments(context.Background(), query)
 }
 
 // Dead
-func (mq *MQueue) Dead() (int64, error) {
+func (mq *MQueue) Dead(channel ...string) (int64, error) {
 	query := bson.M{"dead": true}
+	if len(channel) >= 1 {
+		query["channel"] = channel[0]
+	}
 	return mq.coll.CountDocuments(context.Background(), query)
 }
 
