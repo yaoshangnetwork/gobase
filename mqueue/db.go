@@ -1,24 +1,25 @@
-package mongo
+package mqueue
 
 import (
 	"context"
 	"time"
 
-	mongodb "go.mongodb.org/mongo-driver/mongo"
+	"go.mongodb.org/mongo-driver/mongo"
 	"go.mongodb.org/mongo-driver/mongo/options"
 )
 
-type Config struct {
-	URI      string `yaml:"uri"`
-	Database string `yaml:"database"`
+type DBConfig struct {
+	URI        string `yaml:"uri"`
+	Database   string `yaml:"database"`
+	Collection string `yaml:"collection"`
 }
 
-func Init(config Config) *mongodb.Database {
+func connect(config DBConfig) *mongo.Collection {
 	clientOptions := options.Client().ApplyURI(config.URI)
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 
-	client, err := mongodb.Connect(ctx, clientOptions)
+	client, err := mongo.Connect(ctx, clientOptions)
 	if err != nil {
 		panic(err)
 	}
@@ -30,5 +31,6 @@ func Init(config Config) *mongodb.Database {
 	}
 
 	// 选择数据库
-	return client.Database(config.Database)
+	db := client.Database(config.Database)
+	return db.Collection(config.Collection)
 }
