@@ -1,6 +1,10 @@
 package mongo
 
-import "go.mongodb.org/mongo-driver/bson/primitive"
+import (
+	"go.mongodb.org/mongo-driver/bson/primitive"
+)
+
+// BaseModel `bson:",inline"`
 
 type BaseModel struct {
 	ID        primitive.ObjectID `json:"id"        bson:"_id,omitempty"`
@@ -8,4 +12,9 @@ type BaseModel struct {
 	UpdatedAt int64              `json:"updated_at" bson:"updated_at"`
 	DeletedAt *int64             `json:"-"         bson:"deleted_at,omitempty"`
 	IsDeleted bool               `json:"-"         bson:"is_deleted"`
+}
+
+func (b *BaseModel) BeforeCreate() {
+	b.CreatedAt = nowTimestamp()
+	b.UpdatedAt = b.CreatedAt
 }

@@ -3,6 +3,7 @@ package mongo
 import (
 	"context"
 	"errors"
+	"reflect"
 	"time"
 
 	"go.mongodb.org/mongo-driver/bson"
@@ -21,14 +22,22 @@ type IBaseRepo[T any] interface {
 	UpdateOne(filter bson.M, update any) error
 	UpdateByID(id primitive.ObjectID, update any) error
 
+	DeleteOne(filter bson.M) error
+	DeleteByID(id primitive.ObjectID) error
+
+	ForceDeleteOne(filter bson.M) error
+	ForceDeleteByID(id primitive.ObjectID) error
+
 	List(filter bson.M, page int64, size int64) ([]*T, int64, error)
 	All(filter bson.M) ([]*T, error)
 	Exist(filter bson.M) (bool, error)
 	Count(filter bson.M) (int64, error)
-	DeleteByID(id primitive.ObjectID) error
+
+	WithContext(ctx context.Context) IBaseRepo[T]
 }
 
 type BaseRepo[T any] struct {
+	ctx  *context.Context
 	Coll *mongodb.Collection
 }
 
@@ -39,8 +48,22 @@ func nowTimestamp() int64 {
 	return time.Now().UnixNano() / int64(time.Millisecond)
 }
 
+func (r *BaseRepo[T]) getContext() context.Context {
+	if r.ctx != nil {
+		return *r.ctx
+	}
+	return context.Background()
+}
+
 func (r *BaseRepo[T]) InsertOne(doc *T) (primitive.ObjectID, error) {
-	result, err := r.Coll.InsertOne(context.Background(), doc)
+	v := reflect.ValueOf(doc)
+
+	method := v.MethodByName("BeforeCreate")
+	if method.IsValid() && method.Type().NumIn() == 0 && method.Type().NumOut() == 0 {
+		method.Call(nil)
+	}
+
+	result, err := r.Coll.InsertOne(r.getContext(), doc)
 	if err != nil {
 		return primitive.NilObjectID, err
 	}
@@ -51,11 +74,16 @@ func (r *BaseRepo[T]) InsertOne(doc *T) (primitive.ObjectID, error) {
 func (r *BaseRepo[T]) InsertMany(docs []*T) ([]primitive.ObjectID, error) {
 	// 转换为 []interface{}
 	interfaceDocs := make([]interface{}, len(docs))
-	for i, v := range docs {
-		interfaceDocs[i] = v
+	for i, doc := range docs {
+		v := reflect.ValueOf(doc)
+		method := v.MethodByName("BeforeCreate")
+		if method.IsValid() && method.Type().NumIn() == 0 && method.Type().NumOut() == 0 {
+			method.Call(nil)
+		}
+		interfaceDocs[i] = doc
 	}
 
-	result, err := r.Coll.InsertMany(context.Background(), interfaceDocs)
+	result, err := r.Coll.InsertMany(r.getContext(), interfaceDocs)
 	if err != nil {
 		return nil, err
 	}
@@ -74,7 +102,7 @@ func (r *BaseRepo[T]) FindOne(filter bson.M) (*T, error) {
 		filter = bson.M{}
 	}
 	filter["is_deleted"] = false
-	err := r.Coll.FindOne(context.Background(), filter).Decode(result)
+	err := r.Coll.FindOne(r.getContext(), filter).Decode(result)
 	return result, err
 }
 
@@ -89,7 +117,7 @@ func (r *BaseRepo[T]) UpdateOne(filter bson.M, update any) error {
 	}
 	filter["is_deleted"] = false
 	_, err := r.Coll.UpdateOne(
-		context.Background(),
+		r.getContext(),
 		filter,
 		update,
 	)
@@ -109,15 +137,15 @@ func (r *BaseRepo[T]) List(filter bson.M, page int64, size int64) ([]*T, int64, 
 	result := make([]*T, 0, size)
 
 	cursor, err := r.Coll.Find(
-		context.Background(),
+		r.getContext(),
 		filter,
 		options.Find().SetSkip((page-1)*size).SetLimit(size),
 	)
 	if err != nil {
 		return result, 0, err
 	}
-	defer cursor.Close(context.Background())
-	if err = cursor.All(context.Background(), result); err != nil {
+	defer cursor.Close(r.getContext())
+	if err = cursor.All(r.getContext(), result); err != nil {
 		return result, 0, err
 	}
 
@@ -138,14 +166,14 @@ func (r *BaseRepo[T]) All(filter bson.M) ([]*T, error) {
 	result := make([]*T, 0)
 
 	cursor, err := r.Coll.Find(
-		context.Background(),
+		r.getContext(),
 		filter,
 	)
 	if err != nil {
 		return result, err
 	}
-	defer cursor.Close(context.Background())
-	if err = cursor.All(context.Background(), result); err != nil {
+	defer cursor.Close(r.getContext())
+	if err = cursor.All(r.getContext(), result); err != nil {
 		return result, err
 	}
 
@@ -168,15 +196,40 @@ func (r *BaseRepo[T]) Count(filter bson.M) (int64, error) {
 		filter = bson.M{}
 	}
 	filter["is_deleted"] = false
-	return r.Coll.CountDocuments(context.Background(), filter)
+	return r.Coll.CountDocuments(r.getContext(), filter)
 }
 
-func (r *BaseRepo[T]) DeleteByID(id primitive.ObjectID) error {
+func (r *BaseRepo[T]) DeleteOne(filter bson.M) error {
+	if filter == nil {
+		filter = bson.M{}
+	}
+	filter["is_deleted"] = false
 	_, err := r.Coll.UpdateOne(
-		context.Background(),
-		bson.M{"_id": id, "is_deleted": false},
+		r.getContext(),
+		filter,
 		bson.M{
 			"$set": bson.M{"deleted_at": nowTimestamp(), "is_deleted": true},
 		})
 	return err
+}
+
+func (r *BaseRepo[T]) DeleteByID(id primitive.ObjectID) error {
+	return r.DeleteOne(bson.M{"_id": id})
+}
+
+func (r *BaseRepo[T]) ForceDeleteOne(filter bson.M) error {
+	_, err := r.Coll.DeleteOne(r.getContext(), filter)
+	return err
+}
+
+func (r *BaseRepo[T]) ForceDeleteByID(id primitive.ObjectID) error {
+	_, err := r.Coll.DeleteOne(r.getContext(), bson.M{"_id": id})
+	return err
+}
+
+func (r *BaseRepo[T]) WithContext(ctx context.Context) IBaseRepo[T] {
+	return &BaseRepo[T]{
+		ctx:  &ctx,
+		Coll: r.Coll,
+	}
 }
