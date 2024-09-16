@@ -2,7 +2,6 @@ package mqueue
 
 import (
 	"context"
-	"fmt"
 	"log"
 	"reflect"
 	"time"
@@ -324,11 +323,9 @@ func (item *QueueItem) PayloadDecode(doc any) bool {
 func decode(data any, doc any) bool {
 	m, err := bson.Marshal(data)
 	if err != nil {
-		fmt.Println(err)
 		return false
 	}
 	if err = bson.Unmarshal(m, doc); err != nil {
-		fmt.Println(err)
 		return false
 	}
 	return true
