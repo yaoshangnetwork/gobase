@@ -44,28 +44,49 @@ const (
 	DefaultVisibility      = time.Minute * 5
 )
 
+type Channel struct {
+	Name       string        `bson:"name"`
+	Visibility time.Duration `bson:"visibility"`
+	MaxTries   int64         `bson:"max_tries"`
+}
+
 type QueueOpts struct {
-	Visibility time.Duration
-	MaxTries   int
-	Mode       Mode
-	Channels   []string
-	DB         DBConfig
+	Mode     Mode
+	DB       DBConfig
+	channels []*Channel
 }
 
 func NewMQueue(opts QueueOpts) *MQueue {
-	if opts.Visibility <= 0 {
-		panic("visibility must be greater than 0")
-	}
-	if len(opts.Channels) == 0 {
-		panic("channels cannot be empty")
-	}
 	if opts.Mode == "" {
 		opts.Mode = ReleaseMode
 	}
 
 	mq := &MQueue{coll: connect(opts.DB), opts: &opts}
+	mq.setChannels()
+	go func() {
+		// 每 10 分钟更新
+		time.Sleep(time.Minute * 10)
+		mq.setChannels()
+	}()
 	mq.createIndexes()
 	return mq
+}
+
+// setChannels
+func (mq *MQueue) setChannels() {
+	cur, err := mq.coll.Database().Collection(mq.opts.DB.ConfigCollection).Find(context.Background(), bson.M{"key": "channels"})
+	if err != nil {
+		return
+	}
+	type channelsConf struct {
+		Channels []*Channel `bson:"value"`
+	}
+	conf := new(channelsConf)
+	err = cur.Decode(conf)
+	if err != nil {
+		return
+	}
+	mq.opts.channels = conf.Channels
 }
 
 // createIndexes
@@ -124,12 +145,21 @@ func (mq *MQueue) Add(item ...Item) bool {
 }
 
 func (mq *MQueue) channelExist(c string) bool {
-	for _, channel := range mq.opts.Channels {
-		if c == channel {
+	for _, channel := range mq.opts.channels {
+		if c == channel.Name {
 			return true
 		}
 	}
 	return false
+}
+
+func (mq *MQueue) getChannel(c string) *Channel {
+	for _, channel := range mq.opts.channels {
+		if c == channel.Name {
+			return channel
+		}
+	}
+	return nil
 }
 
 func (mq *MQueue) insertItems(items []Item) bool {
@@ -159,13 +189,14 @@ func (mq *MQueue) insertItems(items []Item) bool {
 
 // Get
 func (mq *MQueue) Get(channel string) (*QueueItem, bool) {
-	if !mq.channelExist(channel) {
+	c := mq.getChannel(channel)
+	if c == nil {
 		return nil, false
 	}
 	query := bson.M{"channel": channel, "visible": bson.M{"$lte": time.Now()}, "dead": false, "deleted": nil}
 	update := bson.M{
 		"$inc": bson.M{"tries": 1},
-		"$set": bson.M{"ack": id(), "visible": time.Now().Add(mq.opts.Visibility)},
+		"$set": bson.M{"ack": id(), "visible": time.Now().Add(c.Visibility)},
 	}
 	after := options.After
 	res := mq.coll.FindOneAndUpdate(context.Background(), query, update, &options.FindOneAndUpdateOptions{
@@ -180,7 +211,7 @@ func (mq *MQueue) Get(channel string) (*QueueItem, bool) {
 	if err != nil {
 		return nil, false
 	}
-	if mq.opts.MaxTries > 0 && item.Tries > mq.opts.MaxTries {
+	if c.MaxTries > 0 && item.Tries > int(c.MaxTries) {
 		mq.coll.UpdateOne(
 			context.Background(),
 			bson.M{"ack": item.Ack},
@@ -223,10 +254,14 @@ func (mq *MQueue) Ack(ack string) bool {
 }
 
 // Ping
-func (mq *MQueue) Ping(ack string) bool {
+func (mq *MQueue) Ping(channel, ack string) bool {
+	c := mq.getChannel(channel)
+	if c == nil {
+		return false
+	}
 	query := bson.M{"ack": ack, "visible": bson.M{"$gt": time.Now()}, "dead": false, "deleted": nil}
 	update := bson.M{
-		"$set": bson.M{"visible": time.Now().Add(mq.opts.Visibility)},
+		"$set": bson.M{"visible": time.Now().Add(c.Visibility)},
 	}
 	res, err := mq.coll.UpdateOne(context.Background(), query, update)
 	if err != nil {

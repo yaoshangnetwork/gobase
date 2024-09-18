@@ -9,9 +9,10 @@ import (
 )
 
 type DBConfig struct {
-	URI        string `yaml:"uri"`
-	Database   string `yaml:"database"`
-	Collection string `yaml:"collection"`
+	URI              string `yaml:"uri"`
+	Database         string `yaml:"database"`
+	Collection       string `yaml:"collection"`
+	ConfigCollection string `yaml:"config_collection"`
 }
 
 func connect(config DBConfig) *mongo.Collection {
