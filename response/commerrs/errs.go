@@ -7,6 +7,6 @@ type APIError struct {
 
 var _ error = (*APIError)(nil)
 
-func (e *APIError) Error() string {
+func (e APIError) Error() string {
 	return e.Message
 }
