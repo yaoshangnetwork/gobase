@@ -35,6 +35,30 @@ func TestFind(t *testing.T) {
 	}
 }
 
+func TestFindIndex(t *testing.T) {
+	slice := []int{1, 2, 3, 4, 5}
+	index := sliceutils.FindIndex(slice, func(item int) bool { return item > 1 })
+	if index != 1 {
+		t.Error("find error")
+	}
+	index = sliceutils.FindIndex(slice, func(item int) bool { return item > 10 })
+	if index != -1 {
+		t.Error("find error")
+	}
+}
+
+func TestFindLastIndex(t *testing.T) {
+	slice := []int{1, 1, 2, 2, 2}
+	index := sliceutils.FindLastIndex(slice, func(item int) bool { return item == 2 })
+	if index != 4 {
+		t.Error("find error")
+	}
+	index = sliceutils.FindLastIndex(slice, func(item int) bool { return item == 1 })
+	if index != 1 {
+		t.Error("find error")
+	}
+}
+
 func TestSome(t *testing.T) {
 	slice := []int{1, 2, 3, 4, 5}
 	some := sliceutils.Some(slice, func(item int) bool { return item == 3 })

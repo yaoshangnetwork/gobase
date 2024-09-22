@@ -9,13 +9,13 @@ import (
 )
 
 type DBConfig struct {
-	URI              string `yaml:"uri"`
-	Database         string `yaml:"database"`
-	Collection       string `yaml:"collection"`
-	ConfigCollection string `yaml:"config_collection"`
+	URI               string `yaml:"uri"`
+	Database          string `yaml:"database"`
+	MessageCollection string `yaml:"message_collection"`
+	ChannelCollection string `yaml:"channel_collection"`
 }
 
-func connect(config DBConfig) *mongo.Collection {
+func connect(config DBConfig) *mongo.Database {
 	clientOptions := options.Client().ApplyURI(config.URI)
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
@@ -32,6 +32,5 @@ func connect(config DBConfig) *mongo.Collection {
 	}
 
 	// 选择数据库
-	db := client.Database(config.Database)
-	return db.Collection(config.Collection)
+	return client.Database(config.Database)
 }

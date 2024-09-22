@@ -10,7 +10,7 @@ import (
 
 func Success(ctx *gin.Context, data any) {
 	ctx.JSON(http.StatusOK, gin.H{
-		"code":    200,
+		"code":    0,
 		"message": "success",
 		"data":    data,
 	})
