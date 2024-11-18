@@ -14,36 +14,38 @@ import (
 )
 
 type MessageNode struct {
-	coll    *mongo.Collection
-	mode    Mode
-	channel *ChannelNode
+	mode       Mode
+	coll       *mongo.Collection
+	visibility time.Duration
 }
 
 type IMessageNode interface {
 	Add(message ...Message) bool
-	Clear(channel ...string) bool // dev mode only
-	Get(channel string) (*QueueMessage, bool)
-	Watch(channel string, interval time.Duration) chan *QueueMessage
+	Clear() bool // dev mode only
+	Get() (*QueueMessage, bool)
+	Watch(interval time.Duration) chan *QueueMessage
 	Ack(ack string) bool
-	Ping(channel, ack string) bool
-	Total(channel ...string) (int64, error)
-	Size(channel ...string) (int64, error)
-	InFlight(channel ...string) (int64, error)
-	Done(channel ...string) (int64, error)
-	Dead(channel ...string) (int64, error)
+	Ping(ack string) bool
+	Total() (int64, error)
+	Size() (int64, error)
+	InFlight() (int64, error)
+	Done() (int64, error)
+	Dead() (int64, error)
 }
 
 type QueueMessage struct {
-	Channel string `bson:"channel"`
-	Message any    `bson:"message"`
-	Ack     string `bson:"ack"`
-	Tries   int    `bson:"tries"`
+	Channel  string `bson:"channel"`
+	Message  any    `bson:"message"`
+	Ack      string `bson:"ack"`
+	Tries    int    `bson:"tries"`
+	MaxTries int    `bson:"max_tries"`
 }
 
 type Message struct {
-	Channel string
-	Message any
-	Delay   time.Duration
+	Channel  string
+	Message  any
+	Delay    time.Duration
+	MaxTries int
 }
 
 func id() string {
@@ -67,19 +69,16 @@ func (msg *MessageNode) Add(message ...Message) bool {
 		}
 	}
 
-	docs := make([]interface{}, 0, len(message))
+	docs := make([]interface{}, 0)
 	for _, item := range message {
-		_, ok := msg.channel.Get(item.Channel)
-		if !ok {
-			return false
-		}
 		doc := map[string]any{
-			"channel": item.Channel,
-			"ack":     id(),
-			"message": item.Message,
-			"visible": time.Now().Add(item.Delay),
-			"tries":   int(0),
-			"dead":    false,
+			"channel":   item.Channel,
+			"ack":       id(),
+			"message":   item.Message,
+			"visible":   time.Now().Add(item.Delay),
+			"tries":     int(0),
+			"max_tries": item.MaxTries,
+			"dead":      false,
 		}
 		docs = append(docs, doc)
 	}
@@ -88,29 +87,21 @@ func (msg *MessageNode) Add(message ...Message) bool {
 }
 
 // Clear
-func (msg *MessageNode) Clear(channel ...string) bool {
+func (msg *MessageNode) Clear() bool {
 	if msg.mode != DebugMode {
 		log.Print("the \"Clean\" method can only be used in debug mode")
 		return false
 	}
-	if len(channel) >= 1 {
-		_, err := msg.coll.DeleteMany(context.Background(), bson.M{"channel": channel[0]})
-		return err == nil
-	}
-	_, err := msg.coll.DeleteMany(context.Background(), bson.M{})
+	err := msg.coll.Drop(context.Background())
 	return err == nil
 }
 
 // Get
-func (msg *MessageNode) Get(channel string) (*QueueMessage, bool) {
-	c, ok := msg.channel.Get(channel)
-	if !ok {
-		return nil, false
-	}
-	query := bson.M{"channel": channel, "visible": bson.M{"$lte": time.Now()}, "dead": false, "deleted": nil}
+func (msg *MessageNode) Get() (*QueueMessage, bool) {
+	query := bson.M{"visible": bson.M{"$lte": time.Now()}, "dead": false, "deleted": nil}
 	update := bson.M{
 		"$inc": bson.M{"tries": 1},
-		"$set": bson.M{"ack": id(), "visible": time.Now().Add(c.Visibility)},
+		"$set": bson.M{"ack": id(), "visible": time.Now().Add(DefaultVisibility)},
 	}
 	after := options.After
 	res := msg.coll.FindOneAndUpdate(context.Background(), query, update, &options.FindOneAndUpdateOptions{
@@ -125,7 +116,7 @@ func (msg *MessageNode) Get(channel string) (*QueueMessage, bool) {
 	if err != nil {
 		return nil, false
 	}
-	if c.MaxTries > 0 && message.Tries > int(c.MaxTries) {
+	if message.Tries > message.MaxTries {
 		msg.coll.UpdateOne(
 			context.Background(),
 			bson.M{"ack": message.Ack},
@@ -137,12 +128,12 @@ func (msg *MessageNode) Get(channel string) (*QueueMessage, bool) {
 }
 
 // Watch
-func (msg *MessageNode) Watch(channel string, interval time.Duration) chan *QueueMessage {
+func (msg *MessageNode) Watch(interval time.Duration) chan *QueueMessage {
 	c := make(chan *QueueMessage)
 	go func() {
 		defer close(c)
 		for {
-			if q, ok := msg.Get(channel); ok {
+			if q, ok := msg.Get(); ok {
 				c <- q
 			}
 			time.Sleep(interval)
@@ -175,14 +166,14 @@ func (msg *MessageNode) Ack(ack string) bool {
 }
 
 // Ping
-func (msg *MessageNode) Ping(channel, ack string) bool {
-	c, ok := msg.channel.Get(channel)
-	if !ok {
-		return false
-	}
+func (msg *MessageNode) Ping(ack string) bool {
 	query := bson.M{"ack": ack, "visible": bson.M{"$gt": time.Now()}, "dead": false, "deleted": nil}
+	visibility := msg.visibility
+	if visibility <= 0 {
+		visibility = DefaultVisibility
+	}
 	update := bson.M{
-		"$set": bson.M{"visible": time.Now().Add(c.Visibility)},
+		"$set": bson.M{"visible": time.Now().Add(visibility)},
 	}
 	res, err := msg.coll.UpdateOne(context.Background(), query, update)
 	if err != nil {
@@ -192,46 +183,31 @@ func (msg *MessageNode) Ping(channel, ack string) bool {
 }
 
 // Total
-func (msg *MessageNode) Total(channel ...string) (int64, error) {
-	if len(channel) >= 1 {
-		return msg.coll.CountDocuments(context.Background(), bson.M{"channel": channel[0]})
-	}
+func (msg *MessageNode) Total() (int64, error) {
 	return msg.coll.CountDocuments(context.Background(), bson.M{})
 }
 
 // Size
-func (msg *MessageNode) Size(channel ...string) (int64, error) {
+func (msg *MessageNode) Size() (int64, error) {
 	query := bson.M{"visible": bson.M{"$lte": time.Now()}, "dead": false, "deleted": nil}
-	if len(channel) >= 1 {
-		query["channel"] = channel[0]
-	}
 	return msg.coll.CountDocuments(context.Background(), query)
 }
 
 // InFlight
-func (msg *MessageNode) InFlight(channel ...string) (int64, error) {
+func (msg *MessageNode) InFlight() (int64, error) {
 	query := bson.M{"visible": bson.M{"$gt": time.Now()}, "dead": false, "deleted": nil}
-	if len(channel) >= 1 {
-		query["channel"] = channel[0]
-	}
 	return msg.coll.CountDocuments(context.Background(), query)
 }
 
 // Done
-func (msg *MessageNode) Done(channel ...string) (int64, error) {
+func (msg *MessageNode) Done() (int64, error) {
 	query := bson.M{"deleted": bson.M{"$exists": true}}
-	if len(channel) >= 1 {
-		query["channel"] = channel[0]
-	}
 	return msg.coll.CountDocuments(context.Background(), query)
 }
 
 // Dead
-func (msg *MessageNode) Dead(channel ...string) (int64, error) {
+func (msg *MessageNode) Dead() (int64, error) {
 	query := bson.M{"dead": true}
-	if len(channel) >= 1 {
-		query["channel"] = channel[0]
-	}
 	return msg.coll.CountDocuments(context.Background(), query)
 }
 

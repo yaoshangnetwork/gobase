@@ -11,8 +11,7 @@ import (
 
 type MQueue struct {
 	opts    *QueueOpts
-	Message *MessageNode
-	Channel *ChannelNode
+	Message MessageNode
 }
 
 type Mode string
@@ -23,63 +22,42 @@ const (
 	DefaultVisibility      = time.Minute * 5
 )
 
+type Channel struct {
+	Name       string
+	Collection string
+}
+
 type QueueOpts struct {
-	Mode Mode
-	DB   DBConfig
+	Mode       Mode
+	DB         DBConfig
+	Visibility time.Duration
 }
 
 func NewMQueue(opts QueueOpts) *MQueue {
 	if opts.Mode == "" {
 		opts.Mode = ReleaseMode
 	}
-
 	database := connect(opts.DB)
-	channel := &ChannelNode{
-		coll: database.Collection(opts.DB.ChannelCollection),
-		mode: opts.Mode,
-	}
-	message := &MessageNode{
-		coll:    database.Collection(opts.DB.MessageCollection),
-		mode:    opts.Mode,
-		channel: channel,
-	}
+
 	mq := &MQueue{
-		opts:    &opts,
-		Message: message,
-		Channel: channel,
+		opts: &opts,
+		Message: MessageNode{
+			mode:       opts.Mode,
+			coll:       database.Collection(opts.DB.Collection),
+			visibility: opts.Visibility,
+		},
 	}
 
 	mq.createIndexes()
-	mq.Channel.Sync()
-
-	// 每分钟同步一次 channel
-	go func() {
-		for {
-			mq.Channel.Sync()
-			time.Sleep(time.Minute)
-		}
-	}()
-
 	return mq
 }
 
 // createIndexes
 func (mq *MQueue) createIndexes() {
-	mq.Message.coll.Indexes().DropAll(context.Background())
-	mq.Channel.coll.Indexes().DropAll(context.Background())
+	// mq.Message.coll.Indexes().DropAll(context.Background())
 
-	// channel name 唯一索引
-	_, err := mq.Channel.coll.Indexes().CreateOne(context.Background(), mongo.IndexModel{
-		Keys:    bson.D{{Key: "name", Value: 1}},
-		Options: options.Index().SetUnique(true),
-	})
-	if err != nil {
-		panic(err)
-	}
-
-	_, err = mq.Message.coll.Indexes().CreateOne(context.Background(), mongo.IndexModel{
+	_, err := mq.Message.coll.Indexes().CreateOne(context.Background(), mongo.IndexModel{
 		Keys: bson.D{
-			{Key: "channel", Value: 1},
 			{Key: "visible", Value: 1},
 			{Key: "dead", Value: 1},
 			{Key: "deleted", Value: 1},
